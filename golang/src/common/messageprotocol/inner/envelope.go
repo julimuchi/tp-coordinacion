@@ -17,3 +17,11 @@ func NewEofEnvelope(clientId string) Envelope {
 		Data:     nil, //Obviamente NO es necesario, pero para que quede super visible
 	}
 }
+
+func NewBroadcastEofEnvelope(clientId string) Envelope {
+	return Envelope{
+		ClientId: clientId,
+		Type:     MessageTypeBroadcastEOF,
+		Data:     nil, //Obviamente NO es necesario, pero para que quede super visible
+	}
+}

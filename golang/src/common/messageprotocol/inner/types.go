@@ -3,8 +3,9 @@ package inner
 import "github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 
 const (
-	MessageTypeData string = "DATA"
-	MessageTypeEOF  string = "EOF"
+	MessageTypeData         string = "DATA"
+	MessageTypeEOF          string = "EOF"
+	MessageTypeBroadcastEOF string = "BRODCAST_EOF"
 )
 
 type Envelope struct {
