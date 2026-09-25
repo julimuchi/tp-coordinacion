@@ -3,6 +3,9 @@ package join
 import (
 	"log/slog"
 
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
@@ -19,8 +22,12 @@ type JoinConfig struct {
 }
 
 type Join struct {
-	inputQueue  middleware.Middleware
-	outputQueue middleware.Middleware
+	inputQueue         middleware.Middleware
+	outputQueue        middleware.Middleware
+	clientFruits       map[string][]fruititem.FruitItem
+	agreggationAmmount int
+	eofClientCount     map[string]int
+	topSize            int
 }
 
 func NewJoin(config JoinConfig) (*Join, error) {
@@ -37,7 +44,14 @@ func NewJoin(config JoinConfig) (*Join, error) {
 		return nil, err
 	}
 
-	return &Join{inputQueue: inputQueue, outputQueue: outputQueue}, nil
+	return &Join{
+		inputQueue:         inputQueue,
+		outputQueue:        outputQueue,
+		agreggationAmmount: config.AggregationAmount,
+		clientFruits:       make(map[string][]fruititem.FruitItem),
+		eofClientCount:     map[string]int{},
+		topSize:            config.TopSize,
+	}, nil
 }
 
 func (join *Join) Run() {
@@ -46,9 +60,57 @@ func (join *Join) Run() {
 	})
 }
 
-func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {
+func (aggregation *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
-	if err := join.outputQueue.Send(msg); err != nil {
-		slog.Error("While sending top", "err", err)
+
+	envelope, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		slog.Error("While deserializing message", "err", err)
+		return
 	}
+
+	if envelope.Type == inner.MessageTypeEOF {
+		if err := aggregation.handleEndOfRecordsMessage(envelope.ClientId); err != nil {
+			slog.Error("While handling end of record message", "err", err)
+		}
+		return
+	}
+
+	if err := aggregation.handleDataMessage(envelope.Data, envelope.ClientId); err != nil {
+		slog.Error("While handling data message", "err", err)
+	}
+}
+
+func (join *Join) handleDataMessage(fruitRecords []fruititem.FruitItem, clientId string) error {
+	join.clientFruits[clientId] = append(join.clientFruits[clientId], fruitRecords...)
+	return nil
+}
+
+func (join *Join) handleEndOfRecordsMessage(clientId string) error {
+	join.eofClientCount[clientId]++
+	if join.eofClientCount[clientId] < join.agreggationAmmount {
+		return nil
+	}
+	// A partir de este punto recibió EOF de todos los nodos aggregation
+	delete(join.eofClientCount, clientId)
+
+	top := join.buildFruitTop(clientId)
+
+	message, err := inner.SerializeMessage(inner.NewDataEnvelope(clientId, top))
+	if err != nil {
+		slog.Debug("While serializing top message", "clientId", clientId, "err", err)
+		return err
+	}
+	if err := join.outputQueue.Send(*message); err != nil {
+		slog.Debug("While sending top message", "clientId", clientId, "err", err)
+		return err
+	}
+	slog.Info("Sent final top", "clientId", clientId, "size", len(top))
+	return nil
+}
+
+func (join *Join) buildFruitTop(clientId string) []fruititem.FruitItem {
+	top := common.TopFruits(join.clientFruits[clientId], join.topSize)
+	delete(join.clientFruits, clientId)
+	return top
 }
