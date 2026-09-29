@@ -3,6 +3,7 @@ package aggregation
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
@@ -57,9 +58,27 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 }
 
 func (aggregation *Aggregation) Run() {
-	aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		aggregation.handleMessage(msg, ack, nack)
-	})
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+
+	go func() {
+		defer waitGroup.Done()
+		aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+			aggregation.handleMessage(msg, ack, nack)
+		})
+	}()
+
+	common.HandleSignals()
+
+	aggregation.inputExchange.StopConsuming()
+
+	waitGroup.Wait()
+
+	aggregation.closeOpenMiddlewares()
+}
+
+func (aggregation *Aggregation) closeOpenMiddlewares() {
+	common.CloseMiddlewares([]middleware.Middleware{aggregation.inputExchange, aggregation.outputQueue})
 }
 
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {

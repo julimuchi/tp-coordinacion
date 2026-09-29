@@ -2,6 +2,7 @@ package join
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
@@ -55,9 +56,30 @@ func NewJoin(config JoinConfig) (*Join, error) {
 }
 
 func (join *Join) Run() {
-	join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		join.handleMessage(msg, ack, nack)
-	})
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+
+	go func() {
+		defer waitGroup.Done()
+		err := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+			join.handleMessage(msg, ack, nack)
+		})
+		if err != nil {
+			slog.Error("inputQueue stopped", "err", err)
+		}
+	}()
+
+	common.HandleSignals()
+
+	join.inputQueue.StopConsuming()
+
+	waitGroup.Wait()
+
+	join.closeOpenMiddlewares()
+}
+
+func (join *Join) closeOpenMiddlewares() {
+	common.CloseMiddlewares([]middleware.Middleware{join.inputQueue, join.outputQueue})
 }
 
 func (aggregation *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {

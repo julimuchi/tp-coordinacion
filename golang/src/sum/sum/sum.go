@@ -88,7 +88,11 @@ func createAggregationExchangeList(aggPrefix string, aggAmount int, connSetting 
 }
 
 func (sum *Sum) Run() {
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+
 	go func() {
+		defer waitGroup.Done()
 		err := sum.inputSumExchange.StartConsuming(
 			func(msg middleware.Message, ack, nack func()) {
 				sum.handleSumMessage(msg, ack, nack)
@@ -98,13 +102,33 @@ func (sum *Sum) Run() {
 			slog.Error("inputSumExchange stopped", "err", err)
 		}
 	}()
+	go func() {
+		defer waitGroup.Done()
+		err := sum.inputGatewayQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+			sum.handleGatewayMessage(msg, ack, nack)
+		})
+		if err != nil {
+			slog.Error("inputGatewayQueue stopped", "err", err)
+		}
+	}()
 
-	err := sum.inputGatewayQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
-		sum.handleGatewayMessage(msg, ack, nack)
-	})
-	if err != nil {
-		slog.Error("inputGatewayQueue stopped", "err", err)
-	}
+	common.HandleSignals()
+
+	sum.inputGatewayQueue.StopConsuming()
+	sum.inputSumExchange.StopConsuming()
+
+	waitGroup.Wait()
+	sum.closeOpenMiddlewares()
+}
+
+func (sum *Sum) closeOpenMiddlewares() {
+	totalOpen := 3 + sum.config.AggregationAmount
+	openMiddlewares := make([]middleware.Middleware, 0, totalOpen)
+	openMiddlewares = append(openMiddlewares, sum.inputGatewayQueue)
+
+	openMiddlewares = append(openMiddlewares, sum.inputGatewayQueue, sum.outputSumExchange, sum.inputSumExchange)
+	openMiddlewares = append(openMiddlewares, sum.outputAggExchangesList...)
+	common.CloseMiddlewares(openMiddlewares)
 }
 
 func (sum *Sum) handleSumMessage(msg middleware.Message, ack func(), nack func()) {

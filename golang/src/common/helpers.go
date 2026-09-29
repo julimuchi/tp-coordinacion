@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sort"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
@@ -46,4 +49,11 @@ func SplitFruitsByAggregator(fruits map[string]fruititem.FruitItem, aggTotal int
 		sets[agg_box_id] = append(sets[agg_box_id], fruit)
 	}
 	return sets
+}
+
+func HandleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
 }
