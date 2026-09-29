@@ -33,3 +33,11 @@ func DeserializeMessage(message *middleware.Message) (*Envelope, error) {
 	return &envelope, nil
 
 }
+
+func SendEnvelope(output middleware.Middleware, envelope Envelope) error {
+	message, err := SerializeMessage(envelope)
+	if err != nil {
+		return err
+	}
+	return output.Send(*message)
+}

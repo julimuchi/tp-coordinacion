@@ -96,24 +96,14 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId string) error
 		// No es necesario que los envelopes tengan distinto nombre
 		// porque estan en bloques distintos...Pero por readibilidad :)
 		dataEnvelope := inner.NewDataEnvelope(clientId, fruitTopRecords)
-		dataMessage, err := inner.SerializeMessage(dataEnvelope)
-		if err != nil {
-			slog.Debug("While serializing Data message", "clientId", clientId, "err", err)
-			return err
-		}
-		if err := aggregation.outputQueue.Send(*dataMessage); err != nil {
+		if err := inner.SendEnvelope(aggregation.outputQueue, dataEnvelope); err != nil {
 			slog.Debug("While sending Data message", "clientId", clientId, "err", err)
 			return err
 		}
 	}
 
 	eofEnvelope := inner.NewEofEnvelope(clientId)
-	eofMessage, err := inner.SerializeMessage(eofEnvelope)
-	if err != nil {
-		slog.Debug("While serializing EOF message", "clientId", clientId, "err", err)
-		return err
-	}
-	if err := aggregation.outputQueue.Send(*eofMessage); err != nil {
+	if err := inner.SendEnvelope(aggregation.outputQueue, eofEnvelope); err != nil {
 		slog.Debug("While sending EOF message", "clientId", clientId, "err", err)
 		return err
 	}

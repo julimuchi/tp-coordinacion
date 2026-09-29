@@ -95,13 +95,9 @@ func (join *Join) handleEndOfRecordsMessage(clientId string) error {
 	delete(join.eofClientCount, clientId)
 
 	top := join.buildFruitTop(clientId)
+	envelope := inner.NewDataEnvelope(clientId, top)
 
-	message, err := inner.SerializeMessage(inner.NewDataEnvelope(clientId, top))
-	if err != nil {
-		slog.Debug("While serializing top message", "clientId", clientId, "err", err)
-		return err
-	}
-	if err := join.outputQueue.Send(*message); err != nil {
+	if err := inner.SendEnvelope(join.outputQueue, envelope); err != nil {
 		slog.Debug("While sending top message", "clientId", clientId, "err", err)
 		return err
 	}

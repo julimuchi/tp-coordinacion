@@ -23,51 +23,68 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputGatewayQueue         middleware.Middleware
-	outputAggregationExchange middleware.Middleware
-	outputSumExchange         middleware.Middleware
-	inputSumExchange          middleware.Middleware
-	clientFruitItemMap        map[string]map[string]fruititem.FruitItem
-	mutex                     sync.Mutex
+	inputGatewayQueue      middleware.Middleware
+	outputAggExchangesList []middleware.Middleware
+	outputSumExchange      middleware.Middleware
+	inputSumExchange       middleware.Middleware
+	clientFruitItemMap     map[string]map[string]fruititem.FruitItem
+	mutex                  sync.Mutex
+	config                 SumConfig
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
 	connSettings := middleware.ConnSettings{Hostname: config.MomHost, Port: config.MomPort}
-
+	openMiddlewares := make([]middleware.Middleware, 0)
 	inputGatewayQueue, err := middleware.CreateQueueMiddleware(config.InputQueue, connSettings)
 	if err != nil {
 		return nil, err
 	}
+	openMiddlewares = append(openMiddlewares, inputGatewayQueue)
 
-	aggregationExchangeRouteKeys := common.BuildExchangeRouteKeys(config.AggregationAmount, config.AggregationPrefix)
-	outputAggregationExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, aggregationExchangeRouteKeys, connSettings)
+	outputAggExchangeList, err := createAggregationExchangeList(config.AggregationPrefix, config.AggregationAmount, connSettings)
+	openMiddlewares = append(openMiddlewares, outputAggExchangeList...)
 	if err != nil {
-		inputGatewayQueue.Close()
+		common.CloseMiddlewares(openMiddlewares)
 		return nil, err
 	}
 
 	sumExchangeRouteKeys := common.BuildExchangeRouteKeys(config.SumAmount, config.SumPrefix)
 	outputSumExchange, err := middleware.CreateExchangeMiddleware(config.SumPrefix, sumExchangeRouteKeys, connSettings)
 	if err != nil {
-		inputGatewayQueue.Close()
-		outputAggregationExchange.Close()
+		common.CloseMiddlewares(openMiddlewares)
 		return nil, err
 	}
+	openMiddlewares = append(openMiddlewares, outputSumExchange)
 
 	inputSumExchange, err := middleware.CreateExchangeMiddleware(config.SumPrefix, []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}, connSettings)
 	if err != nil {
-		inputGatewayQueue.Close()
-		outputAggregationExchange.Close()
-		outputSumExchange.Close()
+		common.CloseMiddlewares(openMiddlewares)
 		return nil, err
 	}
+
 	return &Sum{
-		inputGatewayQueue:         inputGatewayQueue,
-		outputAggregationExchange: outputAggregationExchange,
-		clientFruitItemMap:        map[string]map[string]fruititem.FruitItem{},
-		outputSumExchange:         outputSumExchange,
-		inputSumExchange:          inputSumExchange,
+		inputGatewayQueue:      inputGatewayQueue,
+		outputAggExchangesList: outputAggExchangeList,
+		clientFruitItemMap:     map[string]map[string]fruititem.FruitItem{},
+		outputSumExchange:      outputSumExchange,
+		inputSumExchange:       inputSumExchange,
+		config:                 config,
 	}, nil
+}
+
+func createAggregationExchangeList(aggPrefix string, aggAmount int, connSetting middleware.ConnSettings) ([]middleware.Middleware, error) {
+	list := make([]middleware.Middleware, 0, aggAmount)
+	routeKeys := common.BuildExchangeRouteKeys(aggAmount, aggPrefix)
+
+	for _, key := range routeKeys {
+		m, err := middleware.CreateExchangeMiddleware(aggPrefix, []string{key}, connSetting)
+		if err != nil {
+			return list, err
+		}
+		list = append(list, m)
+	}
+
+	return list, nil
 }
 
 func (sum *Sum) Run() {
@@ -114,19 +131,10 @@ func (sum *Sum) handleSumMessage(msg middleware.Message, ack func(), nack func()
 
 }
 
-func (sum *Sum) broadcastEof(clientId string) error {
+func (sum *Sum) handleBroadcastEofMessage(clientId string) error {
 	slog.Info("sharing EOF message between sum nodes", "clientId", clientId)
 	envelope := inner.NewBroadcastEofEnvelope(clientId)
-	message, err := inner.SerializeMessage(envelope)
-	if err != nil {
-		slog.Debug("While serializing Data message", "clientId", clientId, "err", err)
-		return err
-	}
-	if err := sum.outputSumExchange.Send(*message); err != nil {
-		slog.Debug("While sending Data message", "clientId", clientId, "err", err)
-		return err
-	}
-	return nil
+	return inner.SendEnvelope(sum.outputSumExchange, envelope)
 }
 
 func (sum *Sum) handleGatewayMessage(msg middleware.Message, ack func(), nack func()) {
@@ -144,7 +152,7 @@ func (sum *Sum) handleGatewayMessage(msg middleware.Message, ack func(), nack fu
 
 	switch envelope.Type {
 	case inner.MessageTypeEOF:
-		if err := sum.broadcastEof(envelope.ClientId); err != nil {
+		if err := sum.handleBroadcastEofMessage(envelope.ClientId); err != nil {
 			slog.Error("While broadcasting end of record message", "err", err)
 		}
 	case inner.MessageTypeData:
@@ -160,35 +168,8 @@ func (sum *Sum) handleGatewayMessage(msg middleware.Message, ack func(), nack fu
 func (sum *Sum) handleEndOfRecordMessage(clientId string) error {
 
 	slog.Info("Received End Of Records message", "clientId", clientId)
-	clientFruitsMap := sum.clientFruitItemMap[clientId]
-	clientFruitsArr := make([]fruititem.FruitItem, 0, len(clientFruitsMap))
-	for _, fruit := range clientFruitsMap {
-		clientFruitsArr = append(clientFruitsArr, fruit)
-	}
 
-	if len(clientFruitsArr) > 0 {
-		// No es necesario que los envelopes tengan distinto nombre
-		// porque estan en bloques distintos...Pero por readibilidad :)
-		dataEnvelope := inner.NewDataEnvelope(clientId, clientFruitsArr)
-		dataMessage, err := inner.SerializeMessage(dataEnvelope)
-		if err != nil {
-			slog.Debug("While serializing Data message", "clientId", clientId, "err", err)
-			return err
-		}
-		if err := sum.outputAggregationExchange.Send(*dataMessage); err != nil {
-			slog.Debug("While sending Data message", "clientId", clientId, "err", err)
-			return err
-		}
-	}
-
-	eofEnvelope := inner.NewEofEnvelope(clientId)
-	eofMessage, err := inner.SerializeMessage(eofEnvelope)
-	if err != nil {
-		slog.Debug("While serializing EOF message", "clientId", clientId, "err", err)
-		return err
-	}
-	if err := sum.outputAggregationExchange.Send(*eofMessage); err != nil {
-		slog.Debug("While sending EOF message", "clientId", clientId, "err", err)
+	if err := sum.distributeAndSend(clientId); err != nil {
 		return err
 	}
 
@@ -210,5 +191,29 @@ func (sum *Sum) handleDataMessage(fruitRecords []fruititem.FruitItem, clientId s
 			clientFruitsMap[fruitRecord.Fruit] = fruitRecord
 		}
 	}
+	return nil
+}
+
+func (sum *Sum) distributeAndSend(clientId string) error {
+	fruitsSets := common.SplitFruitsByAggregator(sum.clientFruitItemMap[clientId], sum.config.AggregationAmount)
+
+	for aggBoxId, fruits := range fruitsSets {
+		if len(fruits) == 0 {
+			continue
+		}
+		outputAggBox := sum.outputAggExchangesList[aggBoxId]
+		dataEnvelope := inner.NewDataEnvelope(clientId, fruits)
+		if err := inner.SendEnvelope(outputAggBox, dataEnvelope); err != nil {
+			return err
+		}
+	}
+
+	for _, outputAggBox := range sum.outputAggExchangesList {
+		eofEnvelope := inner.NewEofEnvelope(clientId)
+		if err := inner.SendEnvelope(outputAggBox, eofEnvelope); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
